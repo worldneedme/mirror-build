@@ -92,10 +92,11 @@ jobs:
             $page = "file:///" + ((Resolve-Path "dist/_shot-$tab.html").Path -replace '\\', '/')
             $out = (Join-Path (Get-Location) "screenshots/$tab-$theme.png")
             # chrome.exe is a GUI program, so wait for it explicitly.
+            $themeMode = if ($theme -eq 'dark') { "--force-dark-mode" } else { "--disable-features=WebContentsForceDark" }
             Start-Process -FilePath $chrome -Wait -ArgumentList @(
               "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
               "--force-device-scale-factor=1", "--window-size=520,580", "--default-background-color=2b2b2bff",
-              "--blink-settings=preferredColorScheme=$(if ($theme -eq 'dark') { 1 } else { 0 })", "--virtual-time-budget=4000", "--screenshot=$out", $page)
+              $themeMode, "--virtual-time-budget=4000", "--screenshot=$out", $page)
             if (-not (Test-Path $out)) { throw "screenshot failed: $tab-$theme" }
           } }
           Get-ChildItem screenshots | ForEach-Object { "$($_.Name) $($_.Length) bytes" }
