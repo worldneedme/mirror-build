@@ -1,0 +1,168 @@
+name: build-mirror
+
+# Public build-only repo. The private source (worldneedme/mirror) is fetched with a
+# read-only deploy key, so the source is never made public. The installer is
+# published as a release asset in the PRIVATE source repo, not here.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Private source branch, tag or commit to build
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: win
+    env:
+      UXPLAY_TAG: "2.0.0.1736"
+      SCRCPY_VERSION: "4.1"
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: worldneedme/mirror
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_READ_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: win/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "win/src-tauri -> target"
+
+      - name: Cache runtime archives
+        uses: actions/cache@v4
+        with:
+          path: win/.runtime-cache
+          key: runtimes-uxplay-${{ env.UXPLAY_TAG }}-scrcpy-${{ env.SCRCPY_VERSION }}
+
+      - name: Fetch uxplay + scrcpy runtimes
+        run: ./scripts/fetch-runtimes.ps1 -UxplayTag $env:UXPLAY_TAG -ScrcpyVersion $env:SCRCPY_VERSION
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Generate app icons from assets/logo.svg
+        run: npx tauri icon assets/logo.svg
+
+      - name: Build installer
+        run: npm run tauri build
+
+      - name: Smoke test bundled runtimes
+        run: |
+          $release = "src-tauri/target/release"
+          foreach ($file in @("mirror-win.exe", "bin/uxplay-windows.exe", "bin/platforms/qwindows.dll", "bin/scrcpy/scrcpy.exe", "bin/scrcpy/adb.exe")) {
+            if (-not (Test-Path (Join-Path $release $file))) { throw "missing in release output: $file" }
+          }
+          & "$release/bin/scrcpy/scrcpy.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "scrcpy --version failed" }
+          & "$release/bin/scrcpy/adb.exe" version
+          if ($LASTEXITCODE -ne 0) { throw "adb version failed" }
+          $installer = Get-ChildItem "$release/bundle/nsis/*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer not produced" }
+          "installer: $($installer.Name) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
+
+      - name: UI screenshots (demo mode, headless Chrome)
+        run: |
+          $chrome = "C:/Program Files/Google/Chrome/Application/chrome.exe"
+          New-Item -ItemType Directory -Force screenshots | Out-Null
+          foreach ($theme in @("light", "dark")) { foreach ($tab in @("home", "more")) {
+            # Chrome windows are at least ~500px wide, so render the real 400x580 window inside an exact-size frame.
+            Set-Content -Encoding utf8 "dist/_shot-$tab.html" "<body style='margin:0;background:#2b2b2b'><iframe src='index.html#$tab' width='400' height='580' style='border:0;display:block'></iframe></body>"
+            $page = "file:///" + ((Resolve-Path "dist/_shot-$tab.html").Path -replace '\\', '/')
+            $out = (Join-Path (Get-Location) "screenshots/$tab-$theme.png")
+            # chrome.exe is a GUI program, so wait for it explicitly.
+            Start-Process -FilePath $chrome -Wait -ArgumentList @(
+              "--headless=new", "--disable-gpu", "--hide-scrollbars", "--allow-file-access-from-files",
+              "--force-device-scale-factor=1", "--window-size=520,580", "--default-background-color=2b2b2bff",
+              "--blink-settings=preferredColorScheme=$(if ($theme -eq 'dark') { 1 } else { 0 })", "--virtual-time-budget=4000", "--screenshot=$out", $page)
+            if (-not (Test-Path $out)) { throw "screenshot failed: $tab-$theme" }
+          } }
+          Get-ChildItem screenshots | ForEach-Object { "$($_.Name) $($_.Length) bytes" }
+          Add-Type -AssemblyName System.Drawing
+          function Get-ThemeSample([string]$path) {
+            $bitmap = [System.Drawing.Bitmap]::new($path)
+            try {
+              $x = 200
+              $y = 560
+              if ($x -ge $bitmap.Width -or $y -ge $bitmap.Height) { throw "sample point is outside $path ($($bitmap.Width)x$($bitmap.Height))" }
+              $center = $bitmap.GetPixel($x, $y)
+              $neighbors = @(
+                $bitmap.GetPixel([math]::Max(0, $x - 8), [math]::Max(0, $y - 8)),
+                $bitmap.GetPixel([math]::Min($bitmap.Width - 1, $x + 8), [math]::Max(0, $y - 8)),
+                $bitmap.GetPixel([math]::Max(0, $x - 8), [math]::Min($bitmap.Height - 1, $y + 8)),
+                $bitmap.GetPixel([math]::Min($bitmap.Width - 1, $x + 8), [math]::Min($bitmap.Height - 1, $y + 8))
+              )
+              $meanR = ($neighbors | Measure-Object -Property R -Average).Average
+              $meanG = ($neighbors | Measure-Object -Property G -Average).Average
+              $meanB = ($neighbors | Measure-Object -Property B -Average).Average
+              $contentDelta = [math]::Max([math]::Abs($center.R - $meanR), [math]::Max([math]::Abs($center.G - $meanG), [math]::Abs($center.B - $meanB)))
+              if ($contentDelta -gt 20) {
+                $x = 380
+                $y = 100
+                if ($x -ge $bitmap.Width -or $y -ge $bitmap.Height) { throw "fallback sample point is outside $path ($($bitmap.Width)x$($bitmap.Height))" }
+                $center = $bitmap.GetPixel($x, $y)
+              }
+              $brightness = 0.299 * $center.R + 0.587 * $center.G + 0.114 * $center.B
+              [pscustomobject]@{
+                Name = (Split-Path $path -Leaf)
+                X = $x
+                Y = $y
+                R = $center.R
+                G = $center.G
+                B = $center.B
+                Brightness = [math]::Round($brightness, 3)
+              }
+            } finally {
+              $bitmap.Dispose()
+            }
+          }
+          foreach ($shot in Get-ChildItem screenshots/*.png) {
+            $sample = Get-ThemeSample $shot.FullName
+            $expected = if ($shot.BaseName -match '-(light|dark)$') { $Matches[1] } else { throw "theme missing from filename: $($shot.Name)" }
+            $actual = if ($sample.Brightness -ge 128) { "light" } else { "dark" }
+            Write-Host "$($sample.Name) RGB=($($sample.R),$($sample.G),$($sample.B)) point=($($sample.X),$($sample.Y)) brightness=$($sample.Brightness)判定=$actual"
+            if ($expected -ne $actual) { throw "$($sample.Name): expected $expected but luminance classified it as $actual" }
+          }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: win/screenshots/*.png
+          retention-days: 14
+
+      - name: Publish installer to the private source repo (release asset)
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_RELEASES_TOKEN }}
+        run: |
+          $sha = (git rev-parse HEAD).Trim()
+          $installer = Get-ChildItem "win/src-tauri/target/release/bundle/nsis/*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "installer missing" }
+          $tag = "build-${{ github.run_number }}"
+          gh release create $tag $installer.FullName -R worldneedme/mirror --target $sha --prerelease `
+            --title "$tag ($($installer.Name))" `
+            --notes "Built from $sha by worldneedme/mirror-build run ${{ github.run_id }}."
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          "published $tag : $($installer.Name) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
