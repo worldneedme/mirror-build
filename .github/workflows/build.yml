@@ -11,6 +11,10 @@ on:
         required: true
         default: main
         type: string
+      publish:
+        description: 上传安装包到 mirror 的 Releases
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -92,6 +96,7 @@ jobs:
           retention-days: 14
 
       - name: Publish installer to the private source repo (release asset)
+        if: ${{ inputs.publish }}
         working-directory: .
         env:
           GH_TOKEN: ${{ secrets.MIRROR_RELEASES_TOKEN }}
