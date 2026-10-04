@@ -120,10 +120,50 @@ jobs:
           "installer: $($installer.Name) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
           "installer-bytes: $($installer.Length)"
 
+      - name: Install and start packaged app (smoke gate)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'Installer missing' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'mirror-installed-smoke'
+          $installation = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installDir") -WindowStyle Hidden -PassThru
+          if (-not $installation.WaitForExit(60000)) { throw 'Installation timed out' }
+          if ($installation.ExitCode -ne 0) { throw "Installation failed: $($installation.ExitCode)" }
+          $exe = Join-Path $installDir 'mirror-win.exe'
+          if (-not (Test-Path $exe)) { throw 'Installed executable missing' }
+          $expected = (Get-Content 'package.json' -Raw | ConvertFrom-Json).version
+          $actual = (Get-Item $exe).VersionInfo.ProductVersion
+          if ($actual -ne $expected) { throw "Installed version mismatch: $actual != $expected" }
+          foreach ($relative in @('bin/uxplay-windows.exe', 'bin/platforms/qwindows.dll', 'bin/scrcpy/scrcpy.exe', 'bin/scrcpy/adb.exe')) {
+            if (-not (Test-Path (Join-Path $installDir $relative))) { throw "Installed resource missing: $relative" }
+          }
+          $app = Start-Process -FilePath $exe -WorkingDirectory $installDir -PassThru
+          try {
+            $hasWindow = $false
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              Start-Sleep -Milliseconds 500
+              $app.Refresh()
+              if ($app.HasExited) { throw "Installed app exited during startup: $($app.ExitCode)" }
+              if ($app.MainWindowHandle -ne [IntPtr]::Zero) { $hasWindow = $true; break }
+            }
+            if (-not $hasWindow) { throw 'Installed app did not create a window' }
+            Start-Sleep -Seconds 5
+            $app.Refresh()
+            if ($app.HasExited) { throw 'Installed app exited during stability check' }
+            Write-Host "INSTALL/START PASS version=$actual pid=$($app.Id) title=$($app.MainWindowTitle)"
+          } finally {
+            if (-not $app.HasExited) {
+              $null = $app.CloseMainWindow()
+              if (-not $app.WaitForExit(5000)) { Stop-Process -Id $app.Id -Force }
+            }
+          }
+          $global:LASTEXITCODE = 0
+
       - name: UI screenshots (demo mode, headless Chrome)
         run: ./scripts/ci-screenshots.ps1
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ui-screenshots
           path: win/screenshots/*.png
