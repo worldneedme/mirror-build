@@ -91,6 +91,7 @@ jobs:
           $installer = Get-ChildItem "$release/bundle/nsis/*.exe" | Select-Object -First 1
           if (-not $installer) { throw "NSIS installer not produced" }
           "installer: $($installer.Name) ($([math]::Round($installer.Length / 1MB, 1)) MB)"
+          "installer-bytes: $($installer.Length)"
 
       - name: UI screenshots (demo mode, headless Chrome)
         run: ./scripts/ci-screenshots.ps1
