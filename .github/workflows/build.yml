@@ -69,6 +69,9 @@ jobs:
       - name: Generate app icons from assets/logo.svg
         run: npx tauri icon assets/logo.svg
 
+      - name: Prepare frontend for Clippy
+        run: npm run build
+
       - name: Clippy audit (warning baseline)
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --release
 
