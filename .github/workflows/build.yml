@@ -24,7 +24,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: win
+    steps:
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: worldneedme/mirror
+          ref: ${{ inputs.source_ref }}
+          ssh-key: ${{ secrets.SOURCE_READ_KEY }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test mirror-core
+        run: cargo test --manifest-path crates/mirror-core/Cargo.toml
+
+      - name: Verify mirror-core dependency boundary
+        run: |
+          if cargo tree --manifest-path crates/mirror-core/Cargo.toml | grep -E 'tauri|windows'; then
+            echo "mirror-core must not depend on tauri or windows"
+            exit 1
+          fi
+
   build:
+    needs: core-tests
     runs-on: windows-latest
     defaults:
       run:
