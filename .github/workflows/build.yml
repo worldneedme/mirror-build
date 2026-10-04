@@ -72,8 +72,8 @@ jobs:
       - name: Prepare frontend for Clippy
         run: npm run build
 
-      - name: Clippy audit (warning baseline)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --release
+      - name: Clippy audit (warnings denied)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --release -- -D warnings
 
       - name: Build installer
         run: npm run tauri build
